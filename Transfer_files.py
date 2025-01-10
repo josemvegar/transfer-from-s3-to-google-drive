@@ -1,11 +1,11 @@
 import boto3
 import os
-#import json
+import json
 #import pytz
 #import concurrent.futures
 from pydrive.auth import GoogleAuth
 from pydrive.drive import GoogleDrive
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 # Cargar las variables desde el archivo .env
@@ -16,34 +16,120 @@ AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
 BUCKET_NAME = os.getenv('BUCKET_NAME')
 LOCAL_DOWNLOAD_PATH = os.getenv('LOCAL_DOWNLOAD_PATH')
 LAST_PROCESSED_FILE = os.getenv('LAST_PROCESSED_FILE')
-DAYS_TO_FILTER = os.getenv('DAYS_TO_FILTER')
+DAYS_TO_FILTER = int(os.getenv('DAYS_TO_FILTER'))
 PREFIX= os.getenv('PREFIX')
 FILE_KEY = os.getenv('FILE_KEY')
+FILE_PATH = os.getenv('FILE_PATH')
 
 COST_PER_LIST_REQUEST = os.getenv('COST_PER_LIST_REQUEST')
 COST_PER_GET_REQUEST = os.getenv('COST_PER_GET_REQUEST')
 COST_PER_GB_TRANSFERRED = os.getenv('COST_PER_GB_TRANSFERRED')
 
 # Calcula la fecha límite para el filtro 
-DATE_LIMIT = os.getenv('DATE_LIMIT')
+DATE_LIMIT = datetime.now(timezone.utc) - timedelta(days=DAYS_TO_FILTER)
+
+# Lee el archivo JSON o crea uno nuevo si no existe
+if os.path.exists(FILE_PATH):
+    with open(FILE_PATH, 'r') as f:
+        data = json.load(f)
+else:
+    data = {
+        "dateLimit": DATE_LIMIT.isoformat(),
+        "skip": []
+    }
+
+# Agrega dateLimit a data si no existe
+if "dateLimit" not in data:
+    data["dateLimit"] = DATE_LIMIT.isoformat()
+else:
+    # Comparación de dateLimit con DATE_LIMIT
+    dateLimit_dt = datetime.fromisoformat(data["dateLimit"])
+    if DATE_LIMIT > dateLimit_dt:
+        data["dateLimit"] = DATE_LIMIT.isoformat()
+    else:
+        DATE_LIMIT = dateLimit_dt
 
 s3 = boto3.client( 's3', 
                       aws_access_key_id=AWS_ACCESS_KEY_ID, 
                       aws_secret_access_key=AWS_SECRET_ACCESS_KEY )
 
-def list_folders_in_root(bucket_name, prefix=""):    
-    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix, Delimiter='/')
+def manage_json_skip(prefix, lastModified):
+    prefix_exists = False
+    should_return_true = False
     
-    if 'CommonPrefixes' in response:
-        print(response['CommonPrefixes'])
-        print(f"Folders in '{bucket_name}':")
-        for folder in response['CommonPrefixes']:
-            print(folder['Prefix'])
+    for entry in data["skip"]:
+        if entry["path"] == prefix:
+            prefix_exists = True
+            entry_last_modified_dt = datetime.fromisoformat(entry["lastModified"])
+            if lastModified < DATE_LIMIT:
+                should_return_true = False
+                print(f"La ruta '{prefix}' ha sido saltada.")
+            elif lastModified > DATE_LIMIT:
+                should_return_true = True
+                data["skip"].remove(entry)  # Se elimina el objeto del JSON
+                print(f"La ruta '{prefix}' ha sido borrada del JSON.")
+            break
+
+    # Si el prefix no existe en el JSON, agregarlo
+    if not prefix_exists:
+        data["skip"].append({"path": prefix, "lastModified": lastModified.isoformat()})
+        print(f"La ruta '{prefix}' ha sido agregada al JSON.")
+
+    # Guarda el JSON antes de retornar
+    with open(FILE_PATH, 'w') as f:
+        json.dump(data, f, indent=4)
+    
+    return should_return_true
+
+def get_last_modified_folder(bucket_name, prefix):
+    # Lista los objetos en la carpeta especificada
+    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+    
+    if 'Contents' in response:
+        # Obtén las fechas de última modificación de los objetos
+        last_modified_dates = [obj['LastModified'] for obj in response['Contents']]
+        # Encuentra la fecha más reciente
+        last_modified_date = max(last_modified_dates)
+        #print(f"Última modificación de la carpeta '{prefix}' en el bucket '{bucket_name}': {last_modified_date}")
+        #return last_modified_date
+        manage_json_skip(prefix, last_modified_date)
+        if last_modified_date < DATE_LIMIT:
+            return False
+        return True
     else:
-        print(f"No folders found in '{bucket_name}'. Make sure the bucket name is correct.")
+        #print(f"No se encontraron objetos en la carpeta '{prefix}' del bucket '{bucket_name}'.")
+        manage_json_skip(prefix, datetime.now(timezone.utc))
+        return False
 
 # Ejemplo de uso
-#list_folders_in_root(BUCKET_NAME, PREFIX)
+#print (get_last_modified_folder(BUCKET_NAME, PREFIX))
+#print (DATE_LIMIT)
+
+def list_folders_in_path(bucket_name, prefix="", currentFolder="", pathArray=[]):
+    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix, Delimiter='/')
+
+
+    
+    if 'Contents' in response:
+        if get_last_modified_folder(bucket_name, prefix):
+            pathArray.append(prefix)
+
+    if 'CommonPrefixes' in response:
+        #print(f"Carpetas en '{bucket_name}/{prefix}':")
+        for folder in response['CommonPrefixes']:
+           #print(folder['Prefix'])
+            currentFolder = folder['Prefix'].rstrip('/').split('/')[-1] + '/'
+            #pathArray.append(folder['Prefix'])
+            list_folders_in_path(bucket_name, folder['Prefix'], currentFolder, pathArray)
+            #print(f"Folder: {folder['Prefix']} - Variable currentFolder: {currentFolder}")
+        return pathArray
+    else:
+        #print(f"No se encontraron carpetas en '{bucket_name}/{prefix}'. Asegúrate de que el nombre del bucket y el prefijo son correctos.")
+        return pathArray
+
+
+# Ejemplo de uso
+print (list_folders_in_path(BUCKET_NAME, PREFIX))
 
 
 import boto3
@@ -164,4 +250,8 @@ def main():
 #    main()
 
 # Espera a que el usuario presione Enter para finalizar
-input("Presiona Enter para finalizar...")
+#input("Presiona Enter para finalizar...")
+
+# Cierra el archivo JSON al final del script (sin guardar)
+with open(FILE_PATH, 'r'):
+    pass

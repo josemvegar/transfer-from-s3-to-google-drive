@@ -2,3 +2,4 @@ downloads/
 client_secrets.json
 credentials.json
 .env
+skip_path.json
