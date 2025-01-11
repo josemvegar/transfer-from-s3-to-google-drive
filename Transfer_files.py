@@ -19,7 +19,8 @@ LAST_PROCESSED_FILE = os.getenv('LAST_PROCESSED_FILE')
 DAYS_TO_FILTER = int(os.getenv('DAYS_TO_FILTER'))
 PREFIX= os.getenv('PREFIX')
 FILE_KEY = os.getenv('FILE_KEY')
-FILE_PATH = os.getenv('FILE_PATH')
+FILE_SKIP_PATH = os.getenv('FILE_SKIP_PATH')
+FILE_VALID_PATH = os.getenv('FILE_VALID_PATH')
 
 COST_PER_LIST_REQUEST = os.getenv('COST_PER_LIST_REQUEST')
 COST_PER_GET_REQUEST = os.getenv('COST_PER_GET_REQUEST')
@@ -29,13 +30,21 @@ COST_PER_GB_TRANSFERRED = os.getenv('COST_PER_GB_TRANSFERRED')
 DATE_LIMIT = datetime.now(timezone.utc) - timedelta(days=DAYS_TO_FILTER)
 
 # Lee el archivo JSON o crea uno nuevo si no existe
-if os.path.exists(FILE_PATH):
-    with open(FILE_PATH, 'r') as f:
+if os.path.exists(FILE_SKIP_PATH):
+    with open(FILE_SKIP_PATH, 'r') as f:
         data = json.load(f)
 else:
     data = {
         "dateLimit": DATE_LIMIT.isoformat(),
         "skip": []
+    }
+
+if os.path.exists(FILE_VALID_PATH):
+    with open(FILE_VALID_PATH, 'r') as f:
+        validPath = json.load(f)
+else:
+    validPath = {
+        "path": []
     }
 
 # Agrega dateLimit a data si no existe
@@ -53,83 +62,106 @@ s3 = boto3.client( 's3',
                       aws_access_key_id=AWS_ACCESS_KEY_ID, 
                       aws_secret_access_key=AWS_SECRET_ACCESS_KEY )
 
-def manage_json_skip(prefix, lastModified):
-    prefix_exists = False
-    should_return_true = False
-    
-    for entry in data["skip"]:
-        if entry["path"] == prefix:
-            prefix_exists = True
-            entry_last_modified_dt = datetime.fromisoformat(entry["lastModified"])
-            if lastModified < DATE_LIMIT:
-                should_return_true = False
-                print(f"La ruta '{prefix}' ha sido saltada.")
-            elif lastModified > DATE_LIMIT:
-                should_return_true = True
-                data["skip"].remove(entry)  # Se elimina el objeto del JSON
-                print(f"La ruta '{prefix}' ha sido borrada del JSON.")
-            break
-
-    # Si el prefix no existe en el JSON, agregarlo
-    if not prefix_exists:
-        data["skip"].append({"path": prefix, "lastModified": lastModified.isoformat()})
-        print(f"La ruta '{prefix}' ha sido agregada al JSON.")
-
-    # Guarda el JSON antes de retornar
-    with open(FILE_PATH, 'w') as f:
-        json.dump(data, f, indent=4)
-    
-    return should_return_true
-
-def get_last_modified_folder(bucket_name, prefix):
-    # Lista los objetos en la carpeta especificada
-    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-    
-    if 'Contents' in response:
-        # Obtén las fechas de última modificación de los objetos
-        last_modified_dates = [obj['LastModified'] for obj in response['Contents']]
-        # Encuentra la fecha más reciente
-        last_modified_date = max(last_modified_dates)
-        #print(f"Última modificación de la carpeta '{prefix}' en el bucket '{bucket_name}': {last_modified_date}")
-        #return last_modified_date
-        manage_json_skip(prefix, last_modified_date)
-        if last_modified_date < DATE_LIMIT:
-            return False
-        return True
-    else:
-        #print(f"No se encontraron objetos en la carpeta '{prefix}' del bucket '{bucket_name}'.")
-        manage_json_skip(prefix, datetime.now(timezone.utc))
-        return False
-
 # Ejemplo de uso
 #print (get_last_modified_folder(BUCKET_NAME, PREFIX))
 #print (DATE_LIMIT)
 
-def list_folders_in_path(bucket_name, prefix="", currentFolder="", pathArray=[]):
-    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix, Delimiter='/')
-
-
-    
-    if 'Contents' in response:
-        if get_last_modified_folder(bucket_name, prefix):
-            pathArray.append(prefix)
-
-    if 'CommonPrefixes' in response:
-        #print(f"Carpetas en '{bucket_name}/{prefix}':")
-        for folder in response['CommonPrefixes']:
-           #print(folder['Prefix'])
-            currentFolder = folder['Prefix'].rstrip('/').split('/')[-1] + '/'
-            #pathArray.append(folder['Prefix'])
-            list_folders_in_path(bucket_name, folder['Prefix'], currentFolder, pathArray)
-            #print(f"Folder: {folder['Prefix']} - Variable currentFolder: {currentFolder}")
-        return pathArray
+def agregar_path_validPath(path):
+    if path not in validPath["path"]:
+        validPath["path"].append(path)
+        print(f"La ruta {path} ha sido agregada.")
     else:
-        #print(f"No se encontraron carpetas en '{bucket_name}/{prefix}'. Asegúrate de que el nombre del bucket y el prefijo son correctos.")
-        return pathArray
+        print(f"La ruta {path} ya se encuentra en el arreglo.")
+    
+    with open(FILE_VALID_PATH, 'w') as f:
+        json.dump(validPath, f, indent=4)
 
+def agregar_path_skip(prefix, lastModified):
+    data["skip"].append({"path": prefix, "lastModified": lastModified.isoformat()})
+    print(f"La ruta '{prefix}' ha sido agregada al JSON.")
+
+    with open(FILE_SKIP_PATH, 'w') as f:
+        json.dump(data, f, indent=4)
+
+def borrar_path_validPath(path):
+    if path in validPath["path"]:
+        validPath["path"].remove(path)
+        print(f"La ruta {path} ha sido eliminada.")
+    
+    with open(FILE_VALID_PATH, 'w') as f:
+        json.dump(validPath, f, indent=4)
+
+def borrar_path_skip(prefix):
+    for entry in data["skip"]:
+        if entry["path"] == prefix:
+            data["skip"].remove(entry)
+            print(f"La ruta '{prefix}' ha sido borrada del JSON.")
+            break
+    
+    with open(FILE_SKIP_PATH, 'w') as f:
+        json.dump(data, f, indent=4)
+
+def get_last_modified_folder_NEW(response, prefix):    
+    if 'Contents' in response:
+        last_modified_dates = [obj['LastModified'] for obj in response['Contents']]
+        last_modified_date = max(last_modified_dates)
+
+        if contiene_prefijo(data, prefix):
+            if last_modified_date < DATE_LIMIT:
+                print(f"La ruta '{prefix}' ha sido saltada.")
+                return
+            else:
+                borrar_path_skip(prefix)
+                agregar_path_validPath(prefix)
+        else:
+            if last_modified_date < DATE_LIMIT:
+                agregar_path_skip(prefix, last_modified_date)
+                return
+            else:
+                agregar_path_validPath(prefix)
+                return
+    else:
+        return False
+
+def contiene_prefijo(data, prefix):
+    path_set = set(entry["path"] for entry in data["skip"])
+    return any(path.startswith(prefix) for path in path_set)
+
+
+def list_folders_in_path(bucket_name, prefix=""):
+    continuation_token = None
+
+    while True:
+        if continuation_token:
+            response = s3.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix=prefix,
+                Delimiter='/',
+                ContinuationToken=continuation_token
+            )
+        else:
+            response = s3.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix=prefix,
+                Delimiter='/'
+            )
+
+        get_last_modified_folder_NEW(response, prefix)
+
+        if 'CommonPrefixes' in response:
+            for folder in response['CommonPrefixes']:
+               list_folders_in_path(bucket_name, folder['Prefix'])
+
+        if response.get('IsTruncated'):
+            continuation_token = response.get('NextContinuationToken')
+            print(continuation_token)
+        else:
+            break
+ 
 
 # Ejemplo de uso
-print (list_folders_in_path(BUCKET_NAME, PREFIX))
+list_folders_in_path(BUCKET_NAME, PREFIX)
+print (validPath["path"])
 
 
 import boto3
@@ -253,5 +285,7 @@ def main():
 #input("Presiona Enter para finalizar...")
 
 # Cierra el archivo JSON al final del script (sin guardar)
-with open(FILE_PATH, 'r'):
+with open(FILE_SKIP_PATH, 'r'):
     pass
+#with open(FILE_VALID_PATH, 'r'):
+#    pass
