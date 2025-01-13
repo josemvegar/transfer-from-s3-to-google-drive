@@ -3,3 +3,9 @@ client_secrets.json
 credentials.json
 .env
 skip_path.json
+costs.json
+skip_path - copia.json
+transfer_files - copia.py
+transfered_log.json
+valid_path - copia.json
+valid_path.json
